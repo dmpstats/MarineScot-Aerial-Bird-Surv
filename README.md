@@ -9,7 +9,9 @@ Seven bird species and harbour porpoise were considered - full details can be fo
 
 ## Repository structure
 
-There are two sets of code presented, one calculating power from variable survey effort, the other providing survey polygons for FHD estimation. These are within the folders _Survey power_ and _FHD_ respectively.
+There are two sets of code expected to be of broad utility, one calculating power from variable survey effort, the other providing survey polygons for FHD estimation. These are within the folders _Survey power_ and _FHD_ respectively within the code folder.
+
+Code underpinning the analyses presented within Donovan & Caneco (2020) are provided within the folder _Marine Scotland Analyses_, noting not all data used are included in the repository, only that which is sufficiently small and where able to be freely distributed. Specific data providers would need to be approached to fully replicate results.
 
 ---
 
