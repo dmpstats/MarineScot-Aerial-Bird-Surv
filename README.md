@@ -5,7 +5,7 @@ This repository contains code supporting the work described in Donovan & Caneco 
 * monitoring of population changes
 * estimation of Flight Height Distributions (FHD) with LiDAR
 
-Seven bird species and harbour porpoise were considered - full details can be found in the indicated report.
+Seven bird species and harbour porpoise were considered - full details can be found in the indicated report. The Marine Scotland page for this project can be found [here](https://data.marine.gov.scot/dataset/seabird-survey-designs-east-coast-scotland)
 
 ## Repository structure
 
