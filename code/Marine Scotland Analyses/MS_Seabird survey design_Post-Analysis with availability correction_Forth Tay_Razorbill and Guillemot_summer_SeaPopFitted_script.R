@@ -1,0 +1,381 @@
+### -------------------------------------------------------------------------------------------------------------------------- ###
+### -------------------------------------------------------------------------------------------------------------------------- ###
+### ---                                                                                                                    --- ###
+### ---     Script to simulate survey in a Forth Tay for Razorbill and Guillemot with sighting availability correction     --- ###
+### ---                               Analysis addressing report review request                                            --- ###
+### ---                                                                                                                    --- ###
+### -------------------------------------------------------------------------------------------------------------------------- ###
+### -------------------------------------------------------------------------------------------------------------------------- ###
+
+
+## --------------------- ###
+## ----   Preamble     ----
+## --------------------- ###
+
+require(tidyverse)
+require(sf)
+require(tmap)
+require(tmaptools)
+require(units)
+require(progress)
+require(data.table)
+require(scales)
+require(furrr)
+
+
+source("code/Main Analysis/MS_Seabird survey design_Main Analysis Tools.R")
+
+
+survey_region_label <- "Forth Tay"
+dens_surface_name <- "SeaPop_fitted"
+
+machine_name <- "sauron"
+
+outFolder <- "outputs/simulations/MS_Seabird survey design_Simulation outputs_RazorBill and Guillemot availability correction"
+
+
+## ------------------------ ###
+## ----   Upload data      ----
+## ------------------------ ###
+
+# upload survey region polygon
+Forth_Tay <- st_read(dsn = "data/East coast surveys Marine Scotland/Wider_Forth_Tay_survey_area/Wider_Forth_Tay_survey_area.shp")
+
+
+# Upload density surfaces (for species of interest) for each season
+pops_dens_summer <- st_read(dsn = "data/SeaPop/SEAPOP_OpenSea_Distr_Summer/Summer.shp") %>%
+  select_at(.vars = vars(ID:Ocean, contains("URAAL"), contains("ALTOR")))
+
+pops_dens_autumn <- st_read(dsn = "data/SeaPop/SEAPOP_OpenSea_Distr_Autumn/Autumn.shp") %>%
+  select_at(.vars = vars(ID:Ocean, contains("URAAL"), contains("ALTOR")))
+
+pops_dens_winter <- st_read(dsn = "data/SeaPop/SEAPOP_OpenSea_Distr_Winter/Winter.shp") %>%
+  select_at(.vars = vars(ID:Ocean, contains("URAAL"), contains("ALTOR")))
+
+pops_dens_List <- list(summer = pops_dens_summer, autumn = pops_dens_autumn, winter = pops_dens_winter)
+rm(pops_dens_summer, pops_dens_autumn, pops_dens_winter)
+
+
+# re-project survey region to density surface projections (important to be this way around , as explained in 'survey_simulator')
+Forth_Tay_utm <- st_transform(Forth_Tay, st_crs(pops_dens_List$summer))
+
+
+
+
+## ---------------------------------------------------------------------------------------- ###
+## ----     Apply correction to densities for sighting availability          ----
+## ---------------------------------------------------------------------------------------- ###
+
+#' Predictions in original data assumed adjusted for availability, so back-calculation required to get animals
+#' actually available to observers.
+
+#' Sighting availability corrections from report review feedback
+guillemot_correction <- 0.87
+razorbill_correction <- 0.89
+
+pops_dens_List <- pops_dens_List %>% 
+  map(., function(x){
+    x %>% 
+      mutate(URAAL = URAAL * guillemot_correction,
+             ALTOR = ALTOR * razorbill_correction)
+  })
+
+
+
+
+
+## ------------------------------------------------- ###
+## ----   Test Run (one species in one season)      ----
+## ------------------------------------------------- ###
+
+
+if(0){
+  
+  # -- set up
+  spacing = 5000
+  swath = 500
+  spatial_units = "m"
+  impact = 0
+  
+  # -- Select density for one species in one season and rename the density column as 'cell_N' (to meet formatting requirements)
+  sp_dens_winter <- pops_dens_List$winter %>%
+    select(ID:Ocean, ALTOR) %>%
+    rename(cell_N = ALTOR)
+  
+  
+  # -- check run - runs 1 iteration for QA and plots of example population and survey
+  check_it <- TRUE
+  test_sim_results <- survey_simulator(reps = 5, 
+                                       region_polygon = Forth_Tay_utm, 
+                                       sp_dens_surface = sp_dens_winter,
+                                       trans_spacing = spacing, 
+                                       platform_swath = swath, 
+                                       spatial_units = spatial_units,
+                                       check_it = check_it, 
+                                       do_power = TRUE, 
+                                       impact = impact)
+  
+  
+  # -- test run
+  check_it <- FALSE
+  test_sim_results <- survey_simulator(reps = 5, 
+                                       region_polygon = Forth_Tay_utm, 
+                                       sp_dens_surface = sp_dens_winter,
+                                       trans_spacing = spacing, 
+                                       platform_swath = swath, 
+                                       spatial_units = spatial_units,
+                                       check_it = check_it, 
+                                       do_power = TRUE, 
+                                       impact = impact)
+  
+  # summaries for each simulated survey 
+  test_sim_results$surveys_results
+  
+  # summaries across simulations
+  test_sim_results$sim_summaries
+  
+}
+
+
+
+
+## ------------------------------------------------------------ ###
+## ----    Set up parameter grid and parallelisation           ----
+## ------------------------------------------------------------ ###
+
+# overall parameters
+region = Forth_Tay_utm
+swath = 500
+spatial_units <- "m" # spatial units, for all distances provided bellow
+
+
+# Variable parameters
+impact <- seq(-0.5, 0.5, by = 0.1)
+transectGap <- seq(500, 5500, by = 1000)
+species_col_Name <- c("ALTOR", "URAAL") 
+season <- c("summer", "autumn", "winter")
+
+
+# generate parameter grid
+gridPars <- expand.grid(species_col_Name = species_col_Name, season = season, impact = impact, 
+                        transectGap = transectGap, swath = swath) 
+nrow(gridPars)
+
+# generate simulation/scenario ID
+simName <- gridPars %>% transmute(simName = paste0("Species = ", species_col_Name, "; Season = ", season, 
+                                                   "; Impact = ", impact, "; transectGap = ", transectGap, 
+                                                   ": Swath = ", swath))
+
+
+# split as list, for purrr/furrr use
+gridPars_ls <- gridPars %>%
+  split(., simName)
+
+
+
+
+# Parallelisation function 
+surv_sim_parallel <- function(x, dens_surf, region_poly, spatial_units, survey_reps){
+  
+  # worker-specific parameters
+  spacing = x$transectGap
+  impact = x$impact
+  species_col_Name = as.character(x$species_col_Name)
+  season = x$season
+  swath = x$swath
+  
+  
+  # Select density for one species in one season and rename the density column as 'cell_N'
+  sp_dens <- dens_surf[[season]] %>%
+    select(ID:Y_COORD, matches(paste0("^", species_col_Name, "$"))) %>%
+    rename(cell_N = matches(paste0("^", species_col_Name, "$")))
+  
+  sim_results <- survey_simulator(reps = survey_reps, 
+                                  region_polygon = region_poly, 
+                                  sp_dens_surface = sp_dens,
+                                  trans_spacing = spacing, 
+                                  platform_swath = swath, 
+                                  spatial_units = spatial_units,
+                                  check_it = FALSE, 
+                                  do_power = TRUE, 
+                                  impact = impact,
+                                  progressBar = FALSE)
+  
+  # return summaries across simulations
+  sim_results
+}
+
+
+
+
+## ------------------------------------------------------------ ###
+## ----             RUN the Beast!                             ----
+## ------------------------------------------------------------ ###
+
+# set number of survey replicates per scenario
+nSims = 100
+
+# Set parallelization
+plan(multiprocess, workers = availableCores() - 2)
+
+
+# get starting time
+start_time = Sys.time()
+
+# Run all scenarios for all species
+all_sim_results <- future_map(.x = gridPars_ls, .f = surv_sim_parallel, 
+                              dens_surf = pops_dens_List, region_poly = region, 
+                              spatial_units = spatial_units, 
+                              survey_reps = nSims, .progress = TRUE)
+# get end time
+end_time = Sys.time()
+
+
+
+# get simulation's run time
+run_metrics <- tibble(machine_name, survey_region_label, dens_surface_name, start_time, 
+                      end_time, elapsed_time = end_time - start_time)
+
+
+
+
+
+## ------------------------------------------------------------ ###
+## ----             Gather and save out results                ----
+## ------------------------------------------------------------ ###
+
+runOutputs <- list(all_sim_results = all_sim_results, 
+                   run_metrics = run_metrics)
+
+
+write_rds(runOutputs, path = paste0(outFolder, "_", survey_region_label, "_", dens_surface_name, ".rds"))
+
+
+
+
+
+
+
+## ---------------------------------------------------------------------- ###
+## ----                 Plot and table power results                     ----
+## ---------------------------------------------------------------------- ###
+library(ggthemes)
+library(ggsci)
+
+outFolder <- "outputs/Plots and Tables/"
+
+speciesKey <- tribble(~species_name, ~species_code,
+                      "Common Guillemot", "URAAL",
+                      "Razorbill", "ALTOR")
+
+
+sim_results <- read_rds("outputs/simulations/MS_Seabird survey design_Simulation outputs_RazorBill and Guillemot availability correction_Forth Tay_SeaPop_fitted.rds")
+
+
+
+### ~~~  Re-structure power results data  ~~~ ###
+
+sim_results$all_sim_results$`Species = ALTOR; Season = autumn; Impact = -0.1; transectGap = 1500: Swath = 500`$surveys_results
+
+
+SeaPop_res_power <- sim_results$all_sim_results %>%
+  map(function(x){
+    bind_cols(x$sim_summaries$sim_power_stats,
+              x$sim_summaries$sim_surveys_stats,
+              x$sim_summaries$sim_specs)
+    
+  }) %>%
+  data.table::rbindlist(idcol = "Scenario") %>%
+  mutate(sp_code = str_extract(Scenario, "(?<=Species = )\\w+"), 
+         season = str_to_title(str_extract(Scenario, "(?<=Season = )\\w+")))
+
+
+
+### ~~~  SeaPop Power plots ~~~ ###
+
+SeaPop_res_power %>%
+  mutate(region_name = "Wider Forth and Tay", 
+         layer = "Mean") %>%
+  group_by(region_name, sp_code, season, layer) %>%
+  nest() %>%
+  mutate(powPlots = pmap(list(data, sp_code, season, region_name, layer), function(dat, sp, seas, regName, layerName){
+    
+    #browser()
+    
+    spName <- filter(speciesKey, species_code == sp)$species_name
+    
+    dat %<>%
+      arrange(desc(mean_cvrg_prop)) %>%
+      mutate(Coverage = round(mean_cvrg_prop*100, 0),
+             flight_dist = set_units(mean_cvrg_dist, "km")) 
+    
+    meanFlightDistPerCov <- dat %>%
+      group_by(Coverage) %>%
+      summarise(flight_dist_mean = round(mean(flight_dist), 0), 
+                flight_dist_mean = floor(flight_dist_mean/10)*10)
+    
+    
+    p <- dat %>%
+      left_join(., meanFlightDistPerCov, by = "Coverage") %>%
+      arrange(desc(mean_cvrg_prop)) %>%
+      mutate(panel_title = fct_inorder(as.factor(paste0(Coverage, "% (~", flight_dist_mean, " km)")))) %>%
+      ggplot() +
+      geom_line(aes(impact, power, col = panel_title), size = 1.2, alpha = 0.9, show.legend = FALSE) +
+      geom_hline(yintercept = 0.8, linetype = 'dashed') +
+      geom_vline(xintercept = c(-0.3, 0.3), col = 'blue', alpha = 0.5) +
+      #scale_color_calc() +
+      scale_colour_d3("category10") +
+      facet_wrap(.~panel_title, nrow = 2) +
+      ggtitle(label = paste0(spName, " - ", layerName), paste0(regName, " - ", seas)) +
+      xlab("Impact - proportional change") + #ylab("Power to detect change") +
+      theme_minimal()
+    
+    layerName <- str_replace(layerName, "\\%", "pc")
+    
+    #browser()
+    
+    ggsave(paste0("outputs/Report Plots/power analysis/SeaPop Razorbill and Guillemot with availability correction/SeaPop_Power V plots_",
+                  regName, "_", spName, "_", seas, "_", layerName, ".png"), 
+           plot = p,
+           device = 'png', width = 11, height = 5, units = 'in')
+  }))
+
+
+
+
+
+### ~~~  SeaPop Power Table    ~~~ ###
+
+powerTable <- SeaPop_res_power %>%
+  mutate(region_short = "Forth Tay",
+         predLayer = "Mean") %>%
+  filter(power >= 0.8) %>% 
+  select(region_short, sp_code, season, predLayer, impact, mean_cvrg_prop, mean_cvrg_dist, power) %>%
+  group_by(region_short, sp_code, season, predLayer, impact) %>%
+  arrange(mean_cvrg_dist, power, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(impact = round(impact, 1)) %>%
+  filter(impact %in% c(-0.3, 0.3)) %>%
+  group_by(region_short, sp_code, season, predLayer) %>%
+  summarise(impact = abs(first(impact)), 
+            mean_cvrg_prop = mean(mean_cvrg_prop),
+            mean_cvrg_dist = round(set_units(mean(mean_cvrg_dist), "km"), 0), 
+            power = mean(power)) %>%
+  ungroup() %>%
+  mutate(impact = paste0("+/-", impact), 
+         app_surv_days = round(mean_cvrg_prop/set_units(2000, "km/d"), 2)) %>%
+  left_join(., speciesKey, by = c("sp_code" ="species_code")) %>%
+  complete(sp_code, region_short, season, predLayer)
+
+
+powerTable
+
+write_csv(powerTable, "outputs/SeaPop_Power table_30pct impact_Razobill and Guillemot with availability correction.csv")
+
+
+
+
+
+
+
