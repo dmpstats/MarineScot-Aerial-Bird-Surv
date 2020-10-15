@@ -11,5 +11,6 @@ Seven bird species and harbour porpoise were considered - full details can be fo
 
 There are two sets of code presented, one calculating power from variable survey effort, the other providing survey polygons for FHD estimation. These are within the folders _Survey power_ and _FHD_ respectively.
 
+---
 
 <a name="footnote1">1</a>: Donovan, C. and Caneco, B.A.R. (2020) "Seabird Survey Designs for the East Coast of Scotland". _Scottish Marine and Freshwater Science_ Vol. 11 No. 19.
